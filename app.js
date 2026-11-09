@@ -179,60 +179,31 @@ if(document.getElementById('run-trend')) {
     }
 
     $('run-trend').onclick = async () => {
-        const btn = $('run-trend');
-        const tbody = $('trend-results');
-        const sectorCode = $('trend-sector').value;
-        const originalYear = $('year-select').value; // 원래 보던 연도 기억하기
-
-        btn.disabled = true;
-        $('trend-sector').disabled = true;
-        if($('trend-search')) $('trend-search').disabled = true;
-        
-        tbody.innerHTML = `<tr><td colspan="4" style="padding: 15px; text-align:center;">2022~2024년 데이터를 차례대로 분석 중입니다...<br>⏳ 엑셀 파일 3개를 연속으로 처리하므로 <strong>약 30초~1분 이상</strong> 소요될 수 있습니다. 잠시만 기다려주세요!</td></tr>`;
-
-        try {
-            const years = ['2022', '2023', '2024'];
-            let html = '';
-
-            for (const y of years) {
-                if($('status')) $('status').textContent = `[트렌드 분석] ${y}년 데이터 처리 중...`;
-                
-                // 백그라운드에서 해당 연도 엑셀 다운로드 및 분석
-                const res = await fetch(`./data/io-${y}.xlsx`);
-                if(!res.ok) throw Error(`${y}년 데이터 없음`);
-                await load(await res.arrayBuffer()); 
-                
-                const linkageData = await call('analyze_linkage');
-                const target = linkageData.find(item => item.code === sectorCode);
-
-                if (target) {
-                    const back = Number(target.backward);
-                    const fwd = Number(target.forward);
-                    let note = (back >= 1.0 && fwd >= 1.0) ? '⭐ 핵심산업' : '';
-                    html += `
-                        <tr>
-                            <td style="padding: 10px;"><strong>${y}년</strong></td>
-                            <td>${back.toFixed(3)}</td>
-                            <td>${fwd.toFixed(3)}</td>
-                            <td style="color: #0b5345; font-weight: bold;">${note}</td>
-                        </tr>`;
-                }
+        const btn=$('run-trend'), tbody=$('trend-results');
+        const sectorCode=$('trend-sector').value;
+        if(!sectorCode){tbody.textContent='산업을 먼저 선택하세요.';return;}
+        btn.disabled=true;$('trend-sector').disabled=true;$('trend-search').disabled=true;
+        // Use an isolated worker: never call load() or reset the main scenario.
+        const trendWorker=new Worker('./worker.js');
+        let counter=0; const pending=new Map();
+        function request(type,payload){return new Promise((resolve,reject)=>{const id=++counter;pending.set(id,{resolve,reject});trendWorker.postMessage({id,type,payload});});}
+        trendWorker.onmessage=({data:d})=>{if(d.type==='status')return;const p=pending.get(d.id);if(!p)return;pending.delete(d.id);d.ok?p.resolve(d.result):p.reject(Error(d.error));};
+        trendWorker.onerror=e=>{for(const p of pending.values())p.reject(Error(e.message||'트렌드 작업 오류'));pending.clear();};
+        tbody.replaceChildren();
+        try{
+            for(const year of ['2022','2023','2024']){
+                tbody.setAttribute('aria-label',year+'년 분석 중');
+                btn.textContent=year+'년 분석 중…';
+                const response=await fetch('./data/io-'+year+'.xlsx');
+                if(!response.ok)throw Error(year+'년 자료 HTTP '+response.status);
+                await request('init',await response.arrayBuffer());
+                const data=await request('analyze_linkage');
+                const target=data.find(x=>x.code===sectorCode);
+                const tr=document.createElement('tr');
+                const values=target?[year+'년',Number(target.backward).toFixed(3),Number(target.forward).toFixed(3),target.backward>=1&&target.forward>=1?'핵심산업':'']:[year+'년','자료 없음','자료 없음','해당 코드 없음'];
+                for(const v of values)tr.append(text('td',v));tbody.append(tr);
             }
-            tbody.innerHTML = html;
-            
-            // 원래 보던 연도로 복구
-            if($('status')) $('status').textContent = `트렌드 분석 완료! (원래 보던 ${originalYear}년 데이터로 복구 중...)`;
-            await loadSelectedWorkbook(originalYear);
-            if($('status')) $('status').textContent = `트렌드 분석 완료! (${originalYear}년 데이터 복구됨)`;
-
-        } catch(error) {
-            tbody.innerHTML = `<tr><td colspan="4" style="padding: 15px; text-align:center; color:red;">분석 실패: ${error.message}</td></tr>`;
-            if($('status')) $('status').textContent = `트렌드 분석 실패`;
-        } finally {
-            btn.disabled = false;
-            $('trend-sector').disabled = false;
-            if($('trend-search')) $('trend-search').disabled = false;
-            $('trend-sector').value = sectorCode; // 선택했던 산업 유지
-        }
+        }catch(error){const tr=document.createElement('tr');const td=text('td','트렌드 분석 실패: '+error.message+' · 기존 시나리오와 데이터는 유지됩니다.');td.colSpan=4;tr.append(td);tbody.append(tr);}
+        finally{trendWorker.terminate();pending.clear();btn.disabled=false;btn.textContent='트렌드 분석하기';$('trend-sector').disabled=false;$('trend-search').disabled=false;tbody.removeAttribute('aria-label');}
     };
 }
